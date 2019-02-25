@@ -1,159 +1,163 @@
-var Converter = (function () {
+const fs = require('fs');
 
-  var _fs = null;
-  var _fileLines = null;
-  var _currentLine = null;
-  var _collections = [];
+let fileLines = null;
+const collections = [];
 
-  var reportError = function (errorText) {
-    console.log('ERROR: ' + errorText);
-    process.exit(1);
-  };
+function reportError(errorText) {
+  console.log(`ERROR: ${errorText}`);
+  process.exit(1);
+}
 
-  var getNextLine = function () {
-    return _fileLines.shift().trim();
-  };
+function getNextLine() {
+  return fileLines.shift().trim();
+}
 
-  var hasMoreLines = function () {
-    return _fileLines.length > 0;
-  };
+function hasMoreLines() {
+  return fileLines.length > 0;
+}
 
-  var readFile = function (fileName) {
-    var fileAsString = _fs.readFileSync(fileName, 'utf8');
-    _fileLines = fileAsString.split('\n');
-  };
+function readFile(fileName) {
+  const fileAsString = fs.readFileSync(fileName, 'utf8');
+  fileLines = fileAsString.split('\n');
+}
 
-  var startsWith = function (str, textToFind) {
-    return str.trim().indexOf(textToFind.trim()) === 0;
-  };
+function startsWith(str, textToFind) {
+  return str.trim().indexOf(textToFind.trim()) === 0;
+}
 
-  var convertData = function (data, type) {
-    if(startsWith(type, 'varchar') || startsWith(type, 'text') || startsWith(type, 'date')) {
-      return data;
-    }
-    else if(startsWith(type, 'int') || startsWith(type, 'decimal')) {
-      return Number(data);
-    }
-    else if(startsWith(type, 'tinyint')) {
-      return data == 1;
-    }
-    else {
-      console.log('Don\'t know this type: ' + type);
-      return data;
-    }
-  };
+function convertData(data, type) {
+  if (
+    startsWith(type, 'varchar') ||
+    startsWith(type, 'blob') ||
+    startsWith(type, 'text') ||
+    startsWith(type, 'date') ||
+    startsWith(type, 'char')
+  ) {
+    return data;
+  }
 
-  var readNextTableDef = function () {
-    while(hasMoreLines()) {
-      var currentLine = getNextLine();
+  if (
+    startsWith(type, 'int') ||
+    startsWith(type, 'float') ||
+    startsWith(type, 'decimal')
+  ) {
+    return Number(data);
+  }
 
-      if(startsWith(currentLine, 'CREATE TABLE')) {
-        var tableName = currentLine.split('`')[1];
-        console.log('Converting table: ' + tableName);
-        currentLine = getNextLine();
-        var fields = [];
+  if (startsWith(type, 'tinyint')) {
+    return Number(data) === 1;
+  }
 
-        while(startsWith(currentLine, '`')) {
-          var parts = currentLine.split('`');
-          var fieldName = parts[1];
-          var fieldType = parts[2].split(' ')[1];
+  throw new TypeError(`Don't know this type: ${type}`);
+}
 
-          if(fieldName === 'id') {
-            fieldName = '_id';
-            fieldType = 'text';
-          }
+function readNextTableDef(startLine) {
+  let currentLine = startLine;
 
-          fields.push({
-            name: fieldName,
-            type: fieldType
-          });
+  if (!startsWith(currentLine, 'CREATE TABLE')) {
+    return false;
+  }
 
-          currentLine = getNextLine();
-        }
+  const tableName = currentLine.split('`')[1];
+  console.log(`Converting table: ${tableName}`);
+  currentLine = getNextLine();
+  const fields = [];
 
-        _collections.push({
-          name: tableName,
-          fields: fields
-        });
+  while (startsWith(currentLine, '`')) {
+    const parts = currentLine.split('`');
+    const fieldName = parts[1];
+    const fieldType = parts[2].split(' ')[1];
 
-        return;
-      }
-    }
-  };
+    fields.push({
+      name: fieldName,
+      type: fieldType,
+    });
 
-  var readTableValues = function () {
-    var currentCollection = _collections[_collections.length - 1];
-    var tableName = currentCollection.name;
-    var fields = currentCollection.fields;
+    currentLine = getNextLine();
+  }
 
-    while(hasMoreLines()) {
-      var currentLine = getNextLine();
+  collections.push({
+    name: tableName,
+    fields,
+  });
 
-      if(startsWith(currentLine, 'INSERT INTO')) {
-        currentLine = currentLine.replace('INSERT INTO `' + tableName + '` VALUES ', '');
-        var index = 1;
-        var valueId = 0
-        var insideString = false;
-        var currentValue = '';
-        var values = [];
-        var pair = {};
+  return true;
+}
 
-        while(index < currentLine.length) {
-          var previousChar = currentLine.charAt(index - 1);
-          var currentChar = currentLine.charAt(index);
+function readTableValues(startLine) {
+  let currentLine = startLine;
 
-          if((currentChar === ',' || currentChar === ')') && !insideString) {
-            var field = fields[valueId];
-            pair[field.name] = convertData(currentValue, field.type);
+  if (!startsWith(currentLine, 'INSERT INTO')) {
+    return false;
+  }
 
-            valueId++;
-            currentValue = '';
+  const currentCollection = collections[collections.length - 1];
+  const tableName = currentCollection.name;
+  const { fields } = currentCollection;
 
-            if(currentChar === ')') {
-              index += 2;
-              values.push(pair);
-              pair = {};
-              valueId = 0;
-            }
-          }
-          else if(currentChar === "'" && previousChar !== '\\') {
-            insideString = !insideString;
-          }
-          else {
-            currentValue = currentValue + currentChar;
-          }
+  currentLine = currentLine.replace(`INSERT INTO \`${tableName}\` VALUES `, '');
+  let index = 1;
+  let valueId = 0;
+  let insideString = false;
+  let currentValue = '';
+  const values = [];
+  let pair = {};
 
-          index++;
-        }
+  while (index < currentLine.length) {
+    const previousChar = currentLine.charAt(index - 1);
+    const currentChar = currentLine.charAt(index);
 
-        _collections[_collections.length - 1].values = values;
-        return;
-      }
-    }
-  };
-
-  return {
-    init: function () {
-      if(process.argv.length != 3) {
-        reportError(':-)Please specify exactly one mysqldump input file');
+    if ((currentChar === ',' || currentChar === ')') && !insideString) {
+      const field = fields[valueId];
+      if (!field) {
+        console.log(fields, values, currentValue);
+        throw new ReferenceError(`Unknown value id: ${valueId}`);
       }
 
-      _fs = require('fs');
-      var fileName = process.argv[2];
-      readFile(fileName);
+      pair[field.name] = convertData(currentValue, field.type);
 
-      while(hasMoreLines()) {
-        readNextTableDef();
-        readTableValues();
+      valueId += 1;
+      currentValue = '';
+
+      if (currentChar === ')') {
+        index += 2;
+        values.push(pair);
+        pair = {};
+        valueId = 0;
       }
-
-      for(var i = 0; i < _collections.length; i++) {
-        _fs.writeFileSync(_collections[i].name + '.json', JSON.stringify(_collections[i].values, undefined, 2));
-      }
-
-      process.exit();
+    } else if (currentChar === "'" && previousChar !== '\\') {
+      insideString = !insideString;
+    } else {
+      currentValue += currentChar;
     }
-  };
-})();
 
-Converter.init();
+    index += 1;
+  }
+
+  collections[collections.length - 1].values = values;
+  return true;
+}
+
+if (process.argv.length !== 3) {
+  reportError('Please specify exactly one mysqldump input file');
+}
+
+const fileName = process.argv[2];
+readFile(fileName);
+
+while (hasMoreLines()) {
+  const startLine = getNextLine();
+
+  if (!readNextTableDef(startLine)) {
+    readTableValues(startLine);
+  }
+}
+
+for (let i = 0; i < collections.length; i += 1) {
+  fs.writeFileSync(
+    `${collections[i].name}.json`,
+    JSON.stringify(collections[i].values),
+  );
+}
+
+process.exit();
